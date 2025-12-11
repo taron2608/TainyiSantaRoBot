@@ -1,94 +1,115 @@
-import logging
+import os
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-ASK_BUDGET, ASK_PARTICIPANTS = range(2)
 games = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    games[chat_id] = {"budget": None, "participants": []}
-    await update.message.reply_text("Введите сумму подарка (например: 3000):")
-    return ASK_BUDGET
+    admin_id = update.effective_user.id
 
-async def set_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    try:
-        budget = int(update.message.text.strip())
-    except:
-        await update.message.reply_text("Введите число, например 3000:")
-        return ASK_BUDGET
+    games[chat_id] = {
+        "admin": admin_id,
+        "participants": [],
+        "gift_sum": None,
+        "state": "waiting_sum"
+    }
 
-    games[chat_id]["budget"] = budget
     await update.message.reply_text(
-        "Теперь отправьте список участников через @, по одному в сообщении.\n"
-        "Когда закончите — напишите: ГОТОВО"
+        "🧝 Привет! Введи сумму подарка (например 3000):"
     )
-    return ASK_PARTICIPANTS
 
-async def collect_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    text = update.message.text
 
-    if text.upper() == "ГОТОВО":
-        participants = games[chat_id]["participants"]
-        if len(participants) < 2:
-            await update.message.reply_text("Нужно минимум 2 участника.")
-            return ASK_PARTICIPANTS
-        await assign_and_send(update, context)
-        return ConversationHandler.END
+    if chat_id not in games:
+        return
 
-    if not text.startswith("@"):
-        await update.message.reply_text("Отправляйте никнеймы начинающиеся с @")
-        return ASK_PARTICIPANTS
-
-    games[chat_id]["participants"].append(text)
-    await update.message.reply_text(f"Добавлен: {text}")
-    return ASK_PARTICIPANTS
-
-async def assign_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
     game = games[chat_id]
-    people = game["participants"][:]
+
+    # Ждём сумму подарка
+    if game["state"] == "waiting_sum":
+        if user_id != game["admin"]:
+            await update.message.reply_text("Только админ может задать сумму.")
+            return
+
+        if not text.isdigit():
+            await update.message.reply_text("Введи число, например 3000.")
+            return
+
+        game["gift_sum"] = int(text)
+        game["state"] = "collecting"
+
+        await update.message.reply_text(
+            f"Сумма установлена: {game['gift_sum']} ₽\n\n"
+            "Теперь пусть участники пишут что-нибудь в чат для регистрации."
+        )
+        return
+
+    # Сбор участников
+    if game["state"] == "collecting":
+        if user_id not in game["participants"]:
+            game["participants"].append(user_id)
+            await update.message.reply_text("Участник добавлен!")
+
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if chat_id not in games:
+        return
+
+    game = games[chat_id]
+
+    if user_id != game["admin"]:
+        await update.message.reply_text("Только админ завершает игру.")
+        return
+
+    parts = game["participants"]
+
+    if len(parts) < 2:
+        await update.message.reply_text("Недостаточно участников.")
+        return
 
     import random
-    random.shuffle(people)
-    assigned = people[1:] + people[:1]
+    random.shuffle(parts)
 
-    for giver, receiver in zip(people, assigned):
+    for i in range(len(parts)):
+        giver = parts[i]
+        receiver = parts[(i + 1) % len(parts)]
+
         try:
             await context.bot.send_message(
                 chat_id=giver,
-                text=f"Твой получатель: {receiver}\nБюджет подарка: {game['budget']}₽"
+                text=f"🎁 Ты даришь подарок участнику с ID {receiver}\n"
+                     f"Сумма подарка: {game['gift_sum']} ₽"
             )
         except:
             pass
 
-    await update.message.reply_text("Рассылка завершена! Тайный Санта создан.")
+    await update.message.reply_text("Игра завершена! Каждому отправлены личные сообщения.")
+    del games[chat_id]
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отменено.")
-    return ConversationHandler.END
 
 def main():
-    import os
     token = os.getenv("BOT_TOKEN")
+
     app = ApplicationBuilder().token(token).build()
 
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            ASK_BUDGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_budget)],
-            ASK_PARTICIPANTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_participants)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stop", stop))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    app.add_handler(conv)
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
